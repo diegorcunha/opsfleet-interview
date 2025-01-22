@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: x86-spot-pod
+spec:
+  nodeSelector:
+    kubernetes.io/arch: amd64
+    eks.amazonaws.com/capacityType: SPOT
+  tolerations:
+    - key: "role"
+      operator: "Equal"
+      value: "x86"
+      effect: "NoSchedule"
+  containers:
+    - name: nginx
+      image: nginx:latest

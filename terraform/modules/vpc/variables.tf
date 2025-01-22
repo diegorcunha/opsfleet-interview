@@ -13,3 +13,18 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "azs" {
+  description = "Availability Zones"
+  type        = list(string)
+}
+
+variable "name" {
+  description = "Project Name"
+  type        = string
+}
+
+variable "cluster_name" {
+  description = "EKS Cluster Name"
+  type        = string
+}
