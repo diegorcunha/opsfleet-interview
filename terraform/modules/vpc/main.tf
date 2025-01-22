@@ -1,122 +1,69 @@
-# =============================
-# VPC Configuration
-# =============================
-resource "aws_vpc" "main" {
-  cidr_block           = var.vpc_cidr
-  enable_dns_support   = true
+module "vpc" {
+  source  = "terraform-aws-modules/vpc/aws"
+  version = "~> 5.0"
+
+  name = "${var.environment}-vpc"
+  cidr = var.vpc_cidr
+
+  azs             = var.azs
+  private_subnets = [for k, v in var.azs : cidrsubnet(var.vpc_cidr, 4, k)]
+  public_subnets  = [for k, v in var.azs : cidrsubnet(var.vpc_cidr, 8, k + 48)]
+  intra_subnets   = [for k, v in var.azs : cidrsubnet(var.vpc_cidr, 8, k + 52)]
+
+  enable_nat_gateway   = true
+  single_nat_gateway   = true
   enable_dns_hostnames = true
-  tags = merge(
-    var.tags,
-    { Name = "${var.environment}-vpc" }
-  )
+
+  public_subnet_tags = {
+    "kubernetes.io/role/elb"                    = 1
+  }
+
+  private_subnet_tags = {
+    "kubernetes.io/role/internal-elb" = 1
+    # Tags subnets for Karpenter auto-discovery
+    "karpenter.sh/discovery"                    = var.cluster_name
+    "kubernetes.io/cluster/${var.cluster_name}" = "shared"
+  }
+
+  tags = var.tags
 }
 
-# =============================
-# Internet Gateway for Public Subnets
-# =============================
-resource "aws_internet_gateway" "igw" {
-  vpc_id = aws_vpc.main.id
-  tags = merge(
-    var.tags,
-    { Name = "${var.environment}-igw" }
-  )
-}
+module "vpc_endpoints" {
+  source  = "terraform-aws-modules/vpc/aws//modules/vpc-endpoints"
+  version = "~> 5.1"
 
-# =============================
-# Public Subnets and Route Table
-# =============================
-resource "aws_route_table" "public" {
-  vpc_id = aws_vpc.main.id
-  tags = merge(
-    var.tags,
-    { Name = "${var.environment}-public-route-table" }
-  )
-}
+  vpc_id = module.vpc.vpc_id
 
-resource "aws_route" "public" {
-  route_table_id         = aws_route_table.public.id
-  destination_cidr_block = "0.0.0.0/0"
-  gateway_id             = aws_internet_gateway.igw.id
-}
+  # Security group
+  create_security_group      = true
+  security_group_name_prefix = "${var.name}-vpc-endpoints-"
+  security_group_description = "VPC endpoint security group"
+  security_group_rules = {
+    ingress_https = {
+      description = "HTTPS from VPC"
+      cidr_blocks = [module.vpc.vpc_cidr_block]
+    }
+  }
 
-data "aws_availability_zones" "available" {}
+  endpoints = merge({
+    s3 = {
+      service         = "s3"
+      service_type    = "Gateway"
+      route_table_ids = module.vpc.private_route_table_ids
+      tags = {
+        Name = "${var.name}-s3"
+      }
+    }
+    },
+    { for service in toset(["autoscaling", "ecr.api", "ecr.dkr", "ec2", "ec2messages", "elasticloadbalancing", "sts", "kms", "logs", "ssm", "ssmmessages"]) :
+      replace(service, ".", "_") =>
+      {
+        service             = service
+        subnet_ids          = module.vpc.private_subnets
+        private_dns_enabled = true
+        tags                = { Name = "${var.name}-${service}" }
+      }
+  })
 
-resource "aws_subnet" "public" {
-  # Public subnets in all availability zones
-  count                   = length(data.aws_availability_zones.available.names)
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = cidrsubnet(var.vpc_cidr, 8, count.index)
-  map_public_ip_on_launch = true
-  availability_zone       = data.aws_availability_zones.available.names[count.index]
-  tags = merge(
-    var.tags,
-    { Name = "${var.environment}-public-subnet-${count.index}" }
-  )
-}
-
-resource "aws_route_table_association" "public" {
-  # Associate public subnets with the public route table
-  count          = length(aws_subnet.public)
-  subnet_id      = aws_subnet.public[count.index].id
-  route_table_id = aws_route_table.public.id
-}
-
-# =============================
-# Private Subnets and Route Table
-# =============================
-resource "aws_route_table" "private" {
-  vpc_id = aws_vpc.main.id
-  tags = merge(
-    var.tags,
-    { Name = "${var.environment}-private-route-table" }
-  )
-}
-
-resource "aws_subnet" "private" {
-  # Private subnets in all availability zones
-  count             = length(data.aws_availability_zones.available.names)
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = cidrsubnet(var.vpc_cidr, 8, count.index + length(data.aws_availability_zones.available.names))
-  availability_zone = data.aws_availability_zones.available.names[count.index]
-  tags = merge(
-    var.tags,
-    { Name = "${var.environment}-private-subnet-${count.index}" }
-  )
-}
-
-resource "aws_route_table_association" "private" {
-  # Associate private subnets with the private route table
-  count          = length(aws_subnet.private)
-  subnet_id      = aws_subnet.private[count.index].id
-  route_table_id = aws_route_table.private.id
-}
-
-# =============================
-# Database Subnets and Route Table (No Internet Access)
-# =============================
-resource "aws_route_table" "database" {
-  vpc_id = aws_vpc.main.id
-  tags = merge(
-    var.tags,
-    { Name = "${var.environment}-database-route-table" }
-  )
-}
-
-resource "aws_subnet" "database" {
-  # Database subnets in all availability zones
-  count             = length(data.aws_availability_zones.available.names)
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = cidrsubnet(var.vpc_cidr, 8, count.index + 2 * length(data.aws_availability_zones.available.names))
-  availability_zone = data.aws_availability_zones.available.names[count.index]
-  tags = merge(
-    var.tags,
-    { Name = "${var.environment}-database-subnet-${count.index}" }
-  )
-}
-
-resource "aws_route_table_association" "database" {
-  # Associate database subnets with the database route table
-  count          = length(aws_subnet.database)
-  subnet_id      = aws_subnet.database[count.index].id
-  route_table_id = aws_route_table.database.id
+  tags = var.tags
 }
